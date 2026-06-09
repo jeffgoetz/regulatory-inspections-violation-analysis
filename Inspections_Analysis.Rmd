@@ -1,0 +1,341 @@
+---
+title: "Inspections_Analysis"
+author: "Jeff Goetz, MS"
+date: "2026-06-05"
+output: word_document
+---
+
+## Load appropriate libraries
+
+```{r setup, results=FALSE, warning=FALSE, message=FALSE}
+library(readxl)
+library(dplyr)
+library(janitor)
+library(lme4)
+library(ggplot2)
+library(scales)
+```
+
+## Load and clean dataset
+
+
+```{r}
+dat <- suppressMessages(
+  read_excel("InspectionsAdhocReport.xlsx", sheet = "V2")
+) %>%
+  clean_names() %>%
+  select(-x21, -x164, -x23) %>%
+  mutate(
+    facility_id = as.factor(facility_id),
+    violation = as.factor(violation),
+    inspection_begin_date = as.Date(inspection_begin_date, format = "%m/%d/%Y"),
+    risk = as.factor(risk),
+    square_footage = as.factor(square_footage),
+    region = as.factor(region),
+    est_type = as.factor(est_type)
+  ) %>%
+  mutate(
+    violation = relevel(violation, ref = "No"),
+    risk = relevel(risk, ref = "LOW"),
+    square_footage = relevel(square_footage, ref = "0 - 1,000"),
+    region = relevel(region, ref = "253"),
+    year = format(inspection_begin_date, "%Y"),
+    year = as.factor(year)
+  )
+```
+
+## Build mixed-effects logistic-regression model
+
+```{r main-model, results=FALSE}
+#final mixed-effects logistic regression model
+mod_main <- glmer(
+  violation ~ risk + region + square_footage + (1 | facility_id),
+  family = binomial,
+  data = dat,
+  control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 2e5))
+)
+
+summary(mod_main)
+```
+
+
+```{r}
+#get coefficients and Wald confidence intervals
+coef_tab <- summary(mod_main)$coefficients
+ci_tab <- confint(mod_main, parm = "beta_", method = "Wald")
+
+#create main regression table
+tbl_main_model <- data.frame(
+  term = rownames(coef_tab),
+  OR = exp(coef_tab[, "Estimate"]),
+  CI_low = exp(ci_tab[, 1]),
+  CI_high = exp(ci_tab[, 2]),
+  p_value = coef_tab[, "Pr(>|z|)"],
+  row.names = NULL
+) %>%
+  filter(term != "(Intercept)") %>%
+  mutate(
+    term = recode(
+      term,
+      "riskHIGH" = "Risk: High vs Low",
+      "riskMEDIUM" = "Risk: Medium vs Low",
+      "region251" = "Region 251 vs 253",
+      "region252" = "Region 252 vs 253",
+      "region254" = "Region 254 vs 253",
+      "region255" = "Region 255 vs 253",
+      "region257" = "Region 257 vs 253",
+      "square_footage1,001 - 5,000" = "Square footage: 1,001 - 5,000 vs 0 - 1,000",
+      "square_footage150,001 +" = "Square footage: 150,001 + vs 0 - 1,000",
+      "square_footage20,001 - 40,000" = "Square footage: 20,001 - 40,000 vs 0 - 1,000",
+      "square_footage40,001 - 80,000" = "Square footage: 40,001 - 80,000 vs 0 - 1,000",
+      "square_footage5,001 - 20,000" = "Square footage: 5,001 - 20,000 vs 0 - 1,000",
+      "square_footage80,001 -150,000" = "Square footage: 80,001 -150,000 vs 0 - 1,000",
+      "square_footageN/A" = "Square footage: N/A vs 0 - 1,000"
+    ),
+    OR = round(OR, 2),
+    CI_low = round(CI_low, 2),
+    CI_high = round(CI_high, 2),
+    p_value = round(p_value, 4),
+    `95% CI` = paste0("(", CI_low, ", ", CI_high, ")")
+  )
+
+tbl_main_model %>%
+  select(term, OR, `95% CI`, p_value)
+
+ggplot(
+  tbl_main_model %>% filter(p_value < 0.05),
+  aes(x = OR, y = reorder(term, OR))
+) +
+  geom_point(size = 3) +
+  geom_errorbarh(aes(xmin = CI_low, xmax = CI_high), height = 0.2) +
+  geom_vline(xintercept = 1, linetype = "dashed") +
+  labs(
+    title = "Significant predictors of reported violations",
+    x = "Odds ratio (95% CI)",
+    y = ""
+  ) +
+  theme_minimal()
+```
+
+
+
+## Descriptive summaries
+
+```{r}
+#overall inspection and violation summary
+overall_tab <- dat %>%
+  summarize(
+    total_inspections = n(),
+    violations = sum(violation == "Yes"),
+    no_violations = sum(violation == "No"),
+    pct_violations = round(100 * mean(violation == "Yes"), 1)
+  )
+
+overall_tab
+
+#Table 1: risk
+tab1_risk_wide <- dat %>%
+  group_by(risk, violation) %>%
+  summarize(n = n(), .groups = "drop") %>%
+  tidyr::pivot_wider(names_from = violation, values_from = n, values_fill = 0) %>%
+  mutate(
+    Total = No + Yes,
+    `No violation` = paste0(No, " (", round(100 * No / Total, 1), "%)"),
+    `Violation` = paste0(Yes, " (", round(100 * Yes / Total, 1), "%)")
+  ) %>%
+  select(risk, Total, `No violation`, Violation)
+
+tab1_risk_wide
+
+#Table 1: region
+tab1_region_wide <- dat %>%
+  group_by(region, violation) %>%
+  summarize(n = n(), .groups = "drop") %>%
+  tidyr::pivot_wider(names_from = violation, values_from = n, values_fill = 0) %>%
+  mutate(
+    Total = No + Yes,
+    `No violation` = paste0(No, " (", round(100 * No / Total, 1), "%)"),
+    `Violation` = paste0(Yes, " (", round(100 * Yes / Total, 1), "%)")
+  ) %>%
+  select(region, Total, `No violation`, Violation)
+
+tab1_region_wide
+
+#Table 1: square footage
+tab1_sqft_wide <- dat %>%
+  group_by(square_footage, violation) %>%
+  summarize(n = n(), .groups = "drop") %>%
+  tidyr::pivot_wider(names_from = violation, values_from = n, values_fill = 0) %>%
+  mutate(
+    Total = No + Yes,
+    `No violation` = paste0(No, " (", round(100 * No / Total, 1), "%)"),
+    `Violation` = paste0(Yes, " (", round(100 * Yes / Total, 1), "%)")
+  ) %>%
+  select(square_footage, Total, `No violation`, Violation)
+
+tab1_sqft_wide
+
+#facility repeat summary
+facility_freq <- dat %>%
+  count(facility_id, name = "n_inspections")
+
+facility_summary <- facility_freq %>%
+  summarize(
+    n_facilities = n(),
+    singletons = sum(n_inspections == 1),
+    repeated_2plus = sum(n_inspections >= 2),
+    max_inspections = max(n_inspections),
+    mean_inspections = round(mean(n_inspections), 2)
+  )
+
+facility_summary
+```
+
+
+## Exploratory subgroup analysis
+
+```{r}
+#create High- and Medium-risk subsets
+dat_hm <- dat %>%
+  filter(risk %in% c("HIGH", "MEDIUM")) %>%
+  filter(est_type != "0") %>%
+  droplevels()
+
+dat_high <- dat_hm %>%
+  filter(risk == "HIGH") %>%
+  droplevels()
+
+dat_med <- dat_hm %>%
+  filter(risk == "MEDIUM") %>%
+  droplevels()
+```
+
+## High-risk facilities
+
+```{r}
+#summarize establishment type within High-risk facilities
+tab_high <- dat_high %>%
+  group_by(est_type) %>%
+  summarize(
+    n = n(),
+    violations = sum(violation == "Yes"),
+    prop_violation = round(mean(violation == "Yes"), 4),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(prop_violation))
+
+tab_high
+
+ggplot(tab_high, aes(x = reorder(est_type, prop_violation), y = prop_violation)) +
+  geom_col() +
+  geom_text(aes(label = paste0("n=", n)), hjust = -0.1, size = 3) +
+  coord_flip() +
+  expand_limits(y = max(tab_high$prop_violation) + 0.05) +
+  labs(
+    title = "Violation rate by establishment type within High-risk facilities",
+    x = "Establishment type",
+    y = "Proportion with violation"
+  ) +
+  theme_minimal()
+```
+
+## Medium-risk facilities
+
+```{r}
+#summarize establishment type within Medium-risk facilities
+tab_med <- dat_med %>%
+  group_by(est_type) %>%
+  summarize(
+    n = n(),
+    violations = sum(violation == "Yes"),
+    prop_violation = round(mean(violation == "Yes"), 4),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(prop_violation))
+
+tab_med
+
+ggplot(tab_med, aes(x = reorder(est_type, prop_violation), y = prop_violation)) +
+  geom_col() +
+  geom_text(aes(label = paste0("n=", n)), hjust = -0.1, size = 3) +
+  coord_flip() +
+  expand_limits(y = max(tab_med$prop_violation) + 0.05) +
+  labs(
+    title = "Violation rate by establishment type within Medium-risk facilities",
+    x = "Establishment type",
+    y = "Proportion with violation"
+  ) +
+  theme_minimal()
+```
+
+
+## Year-over-year summary
+
+```{r}
+tab_year <- dat %>%
+  group_by(year) %>%
+  summarize(
+    inspections = n(),
+    violations = sum(violation == "Yes"),
+    pct_violations = round(100 * mean(violation == "Yes"), 1),
+    .groups = "drop"
+  )
+
+tab_year
+
+
+tab_year_risk <- dat %>%
+  group_by(year, risk) %>%
+  summarize(
+    inspections = n(),
+    violations = sum(violation == "Yes"),
+    pct_violations = round(100 * mean(violation == "Yes"), 1),
+    .groups = "drop"
+  )
+
+tab_year_risk
+
+tab_year_risk <- tab_year_risk %>%
+  mutate(
+    risk = factor(risk, levels = c("HIGH", "MEDIUM", "LOW"))
+  )
+
+
+
+ggplot(tab_year_risk, aes(x = year, y = pct_violations, color = risk, group = risk)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 3) +
+  scale_y_continuous(
+    limits = c(0, 30),
+    labels = label_percent(scale = 1)
+  ) +
+  labs(
+    title = "Reported violation rates were highest in 2023 among High- and Medium-risk facilities",
+    subtitle = "Annual percentage of inspections resulting in a reported violation, by risk level",
+    x = "Inspection year",
+    y = "Violation rate",
+    color = "Risk level"
+  ) +
+  theme_minimal()
+```
+
+
+```{r}
+tab_year_est_high <- dat %>%
+  filter(risk == "HIGH", est_type != "0") %>%
+  group_by(year, est_type) %>%
+  summarize(inspections = n(), .groups = "drop") %>%
+  group_by(year) %>%
+  mutate(pct_of_year = round(100 * inspections / sum(inspections), 1))
+
+tab_year_est_high
+
+tab_year_est_med <- dat %>%
+  filter(risk == "MEDIUM", est_type != "0") %>%
+  group_by(year, est_type) %>%
+  summarize(inspections = n(), .groups = "drop") %>%
+  group_by(year) %>%
+  mutate(pct_of_year = round(100 * inspections / sum(inspections), 1))
+
+tab_year_est_med
+```
